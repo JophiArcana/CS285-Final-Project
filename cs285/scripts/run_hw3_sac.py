@@ -1,27 +1,19 @@
-import os
-import time
-import yaml
-
-from cs285.agents.soft_actor_critic import SoftActorCritic
-from cs285.infrastructure.replay_buffer import ReplayBuffer
-import cs285.env_configs
-
-import os
+import argparse
+import pickle
 import time
 
 import gym
-from gym import wrappers
 import numpy as np
 import torch
-from cs285.infrastructure import pytorch_util as ptu
 import tqdm
+from matplotlib import pyplot as plt
 
+from cs285.agents.soft_actor_critic import SoftActorCritic
+from cs285.infrastructure import pytorch_util as ptu
 from cs285.infrastructure import utils
 from cs285.infrastructure.logger import Logger
-
+from cs285.infrastructure.replay_buffer import ReplayBuffer
 from scripting_utils import make_logger, make_config
-
-import argparse
 
 
 def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
@@ -36,7 +28,6 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
     render_env = config["make_env"](render=True)
 
     ep_len = config["ep_len"] or env.spec.max_episode_steps
-    batch_size = config["batch_size"] or batch_size
 
     discrete = isinstance(env.action_space, gym.spaces.Discrete)
     assert (
@@ -63,11 +54,15 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
     observation = env.reset()
 
+    return_logs, start_time = [], time.time()
+    exp_name = args.exp_name
+    if exp_name is None and "exp_name" in config:
+        exp_name = config["exp_name"]
     for step in tqdm.trange(config["total_steps"], dynamic_ncols=True):
         if step < config["random_steps"]:
             action = env.action_space.sample()
         else:
-            # TODO(student): Select an action
+            # DONE(student): Select an action
             action = agent.get_action(observation)
 
         # Step the environment and add the data to the replay buffer
@@ -88,11 +83,18 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
             observation = next_observation
 
         # Train the agent
+        batch, update_info = None, None
         if step >= config["training_starts"]:
-            # TODO(student): Sample a batch of config["batch_size"] transitions from the replay buffer
+            # DONE(student): Sample a batch of config["batch_size"] transitions from the replay buffer
             batch = replay_buffer.sample(config["batch_size"])
-            batch = ptu.from_numpy(batch)
-            update_info = agent.update(batch["observations"], batch["actions"], batch["rewards"], batch["next_observations"], batch["dones"], step)
+            update_info = update_info = agent.update(
+                ptu.from_numpy(batch["observation"]),
+                ptu.from_numpy(batch["action"]),
+                ptu.from_numpy(batch["reward"]),
+                ptu.from_numpy(batch["next_observation"]),
+                ptu.from_numpy(batch["done"]),
+                step
+            )
 
             # Logging
             update_info["actor_lr"] = agent.actor_lr_scheduler.get_last_lr()[0]
@@ -101,19 +103,33 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
             if step % args.log_interval == 0:
                 for k, v in update_info.items():
                     logger.log_scalar(v, k, step)
-                    logger.log_scalars
                 logger.flush()
 
         # Run evaluation
         if step % args.eval_interval == 0:
-            trajectories = utils.sample_n_trajectories(
+            eval_trajs = utils.sample_n_trajectories(
                 eval_env,
                 policy=agent,
                 ntraj=args.num_eval_trajectories,
                 max_length=ep_len,
             )
-            returns = [t["episode_statistics"]["r"] for t in trajectories]
-            ep_lens = [t["episode_statistics"]["l"] for t in trajectories]
+            returns = [t["episode_statistics"]["r"] for t in eval_trajs]
+            ep_lens = [t["episode_statistics"]["l"] for t in eval_trajs]
+
+            if step >= config["training_starts"]:
+                train_trajs = [{k: v[t] for k, v in batch.items()} for t in range(config["batch_size"])]
+                logs = update_info
+                logs.update(utils.compute_metrics(train_trajs, eval_trajs))
+                logs["Train_EnvstepsSoFar"] = step
+                logs["TimeSinceStart"] = time.time() - start_time
+                if step == 0:
+                    logs["Initial_DataCollection_AverageReturn"] = logs["Train_AverageReturn"]
+                return_logs.append(logs)
+
+            if exp_name is not None and len(return_logs) > 0 and step % args.save_frequency == 0:
+                current_return_logs = {k: np.array([d.get(k, return_logs[0][k]) for d in return_logs]) for k in return_logs[0]}
+                with open(f'plot_data/{exp_name}.pkl', 'wb') as fp:
+                    pickle.dump(current_return_logs, fp)
 
             logger.log_scalar(np.mean(returns), "eval_return", step)
             logger.log_scalar(np.mean(ep_lens), "eval_ep_len", step)
@@ -142,11 +158,13 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                     max_videos_to_save=args.num_render_trajectories,
                     video_title="eval_rollouts",
                 )
+    return return_logs
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", "-cfg", type=str, required=True)
+    parser.add_argument("--exp_name", type=str, default=None)
 
     parser.add_argument("--eval_interval", "-ei", type=int, default=5000)
     parser.add_argument("--num_eval_trajectories", "-neval", type=int, default=10)
@@ -155,7 +173,9 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--no_gpu", "-ngpu", action="store_true")
     parser.add_argument("--which_gpu", "-g", default=0)
-    parser.add_argument("--log_interval", type=int, default=1000)
+    parser.add_argument("--video_log_freq", type=int, default=-1)
+    parser.add_argument("--log_interval", type=int, default=1)
+    parser.add_argument("--save_frequency", type=int, default=10000)
 
     args = parser.parse_args()
 
@@ -165,7 +185,19 @@ def main():
     config = make_config(args.config_file)
     logger = make_logger(logdir_prefix, config)
 
-    run_training_loop(config, logger, args)
+    return_logs = run_training_loop(config, logger, args)
+    ####################################################################################################################
+    return_logs = {k: np.array([d.get(k, return_logs[0][k]) for d in return_logs]) for k in return_logs[0]}
+
+    plt.plot(return_logs['Train_EnvstepsSoFar'], return_logs['Eval_AverageReturn'], label='Eval_AverageReturn')
+    plt.show()
+
+    exp_name = args.exp_name
+    if exp_name is None and "exp_name" in config:
+        exp_name = config["exp_name"]
+    if exp_name is not None:
+        with open(f'plot_data/{exp_name}.pkl', 'wb') as fp:
+            pickle.dump(return_logs, fp)
 
 
 if __name__ == "__main__":

@@ -1,23 +1,18 @@
-import time
 import argparse
-
-from cs285.agents.dqn_agent import DQNAgent
-import cs285.env_configs
-
-import os
+import pickle
 import time
 
 import gym
-from gym import wrappers
 import numpy as np
 import torch
-from cs285.infrastructure import pytorch_util as ptu
 import tqdm
+from matplotlib import pyplot as plt
 
+from cs285.agents.dqn_agent import DQNAgent
+from cs285.infrastructure import pytorch_util as ptu
 from cs285.infrastructure import utils
 from cs285.infrastructure.logger import Logger
 from cs285.infrastructure.replay_buffer import MemoryEfficientReplayBuffer, ReplayBuffer
-
 from scripting_utils import make_logger, make_config
 
 MAX_NVIDEO = 2
@@ -28,6 +23,8 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     ptu.init_gpu(use_gpu=not args.no_gpu, gpu_id=args.which_gpu)
+
+    print(f'make_critic: {config["agent_kwargs"]["make_critic"]}')
 
     # make the gym environment
     env = config["make_env"]()
@@ -87,32 +84,32 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
     reset_env_training()
 
+    return_logs, start_time = [], time.time()
+    exp_name = args.exp_name
+    if exp_name is None and "exp_name" in config:
+        exp_name = config["exp_name"]
     for step in tqdm.trange(config["total_steps"], dynamic_ncols=True):
         epsilon = exploration_schedule.value(step)
-        
-        # TOD0(student): Compute action
+
+        # DONE(student): Compute action
         action = agent.get_action(observation, epsilon)
 
-        # TOD0(student): Step the environment
+        # DONE(student): Step the environment
         next_observation, reward, done, info = env.step(action)
-
         next_observation = np.asarray(next_observation)
         truncated = info.get("TimeLimit.truncated", False)
 
-        # TOD0(student): Add the data to the replay buffer
+        # DONE(student): Add the data to the replay buffer
         if isinstance(replay_buffer, MemoryEfficientReplayBuffer):
             # We're using the memory-efficient replay buffer,
             # so we only insert next_observation (not observation)
-            if stacked_frames:
-                replay_buffer.insert(action, reward, next_observation[-1, ...], done and not truncated)
-            else:
-                replay_buffer.insert(action, reward, next_observation, done and not truncated)
+            replay_buffer.insert(np.array([action]), reward, next_observation[-1], ~truncated and done)
         else:
             # We're using the regular replay buffer
-            replay_buffer.insert(observation, action, reward, next_observation, done and not truncated)
+            replay_buffer.insert(observation, np.array([action]), reward, next_observation[-1], ~truncated and done)
 
         # Handle episode termination
-        if done or truncated:
+        if truncated or done:
             reset_env_training()
 
             logger.log_scalar(info["episode"]["r"], "train_return", step)
@@ -121,15 +118,23 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
             observation = next_observation
 
         # Main DQN training loop
-        if step >= config["learning_starts"]:
-            # TOD0(student): Sample config["batch_size"] samples from the replay buffer
+        batch, update_info = None, None
+        if step >= config["training_starts"]:
+            # DONE(student): Sample config["batch_size"] samples from the replay buffer
             batch = replay_buffer.sample(config["batch_size"])
 
             # Convert to PyTorch tensors
             batch = ptu.from_numpy(batch)
 
-            # TOD0(student): Train the agent. `batch` is a dictionary of numpy arrays, YOU ARE DUMB IT'S AN ARRAY OF PYTORCH TENSORS
-            update_info = agent.update(batch["observations"], batch["actions"], batch["rewards"], batch["next_observations"], batch["dones"], step)
+            # DONE(student): Train the agent. `batch` is a dictionary of numpy arrays
+            update_info = agent.update(
+                batch["observation"],
+                batch["action"],
+                batch["reward"],
+                batch["next_observation"],
+                batch["done"],
+                step
+            )
 
             # Logging code
             update_info["epsilon"] = epsilon
@@ -142,14 +147,30 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
         if step % args.eval_interval == 0:
             # Evaluate
-            trajectories = utils.sample_n_trajectories(
+            eval_trajs = utils.sample_n_trajectories(
                 eval_env,
                 agent,
                 args.num_eval_trajectories,
                 ep_len,
             )
-            returns = [t["episode_statistics"]["r"] for t in trajectories]
-            ep_lens = [t["episode_statistics"]["l"] for t in trajectories]
+
+            returns = [t["episode_statistics"]["r"] for t in eval_trajs]
+            ep_lens = [t["episode_statistics"]["l"] for t in eval_trajs]
+
+            if step >= config["training_starts"]:
+                train_trajs = [{k: v[t] for k, v in batch.items()} for t in range(config["batch_size"])]
+                logs = update_info
+                logs.update(utils.compute_metrics(train_trajs, eval_trajs))
+                logs["Train_EnvstepsSoFar"] = step
+                logs["TimeSinceStart"] = time.time() - start_time
+                if step == 0:
+                    logs["Initial_DataCollection_AverageReturn"] = logs["Train_AverageReturn"]
+                return_logs.append(logs)
+
+            if exp_name is not None and len(return_logs) > 0 and step % args.save_frequency == 0:
+                current_return_logs = {k: np.array([d.get(k, return_logs[0][k]) for d in return_logs]) for k in return_logs[0]}
+                with open(f'plot_data/{exp_name}.pkl', 'wb') as fp:
+                    pickle.dump(current_return_logs, fp)
 
             logger.log_scalar(np.mean(returns), "eval_return", step)
             logger.log_scalar(np.mean(ep_lens), "eval_ep_len", step)
@@ -178,11 +199,13 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                     max_videos_to_save=args.num_render_trajectories,
                     video_title="eval_rollouts",
                 )
+    return return_logs
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", "-cfg", type=str, required=True)
+    parser.add_argument("--exp_name", type=str, default=None)
 
     parser.add_argument("--eval_interval", "-ei", type=int, default=10000)
     parser.add_argument("--num_eval_trajectories", "-neval", type=int, default=10)
@@ -191,7 +214,9 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--no_gpu", "-ngpu", action="store_true")
     parser.add_argument("--which_gpu", "-gpu_id", default=0)
-    parser.add_argument("--log_interval", type=int, default=1000)
+    parser.add_argument("--video_log_freq", type=int, default=-1)
+    parser.add_argument("--log_interval", type=int, default=1)
+    parser.add_argument("--save_frequency", type=int, default=10000)
 
     args = parser.parse_args()
 
@@ -201,7 +226,19 @@ def main():
     config = make_config(args.config_file)
     logger = make_logger(logdir_prefix, config)
 
-    run_training_loop(config, logger, args)
+    return_logs = run_training_loop(config, logger, args)
+    ####################################################################################################################
+    return_logs = {k: np.array([d.get(k, return_logs[0][k]) for d in return_logs]) for k in return_logs[0]}
+
+    plt.plot(return_logs['Train_EnvstepsSoFar'], return_logs['Eval_AverageReturn'], label='Eval_AverageReturn')
+    plt.show()
+
+    exp_name = args.exp_name
+    if exp_name is None and "exp_name" in config:
+        exp_name = config["exp_name"]
+    if exp_name is not None:
+        with open(f'plot_data/{exp_name}.pkl', 'wb') as fp:
+            pickle.dump(return_logs, fp)
 
 
 if __name__ == "__main__":

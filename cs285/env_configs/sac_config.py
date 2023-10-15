@@ -152,6 +152,7 @@ def sac_config(
         },
         "replay_buffer_capacity": replay_buffer_capacity,
         "log_name": log_string,
+        "exp_name": exp_name,
         "total_steps": total_steps,
         "random_steps": random_steps,
         "training_starts": training_starts,

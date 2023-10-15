@@ -14,11 +14,11 @@ class ReplayBuffer:
     def sample(self, batch_size):
         rand_indices = np.random.randint(0, self.size, size=(batch_size,)) % self.max_size
         return {
-            "observations": self.observations[rand_indices],
-            "actions": self.actions[rand_indices],
-            "rewards": self.rewards[rand_indices],
-            "next_observations": self.next_observations[rand_indices],
-            "dones": self.dones[rand_indices],
+            "observation": self.observations[rand_indices],
+            "action": self.actions[rand_indices],
+            "reward": self.rewards[rand_indices][:, None],
+            "next_observation": self.next_observations[rand_indices],
+            "done": self.dones[rand_indices],
         }
 
     def __len__(self):
@@ -123,11 +123,11 @@ class MemoryEfficientReplayBuffer:
         )
 
         return {
-            "observations": self.framebuffer[observation_framebuffer_idcs],
-            "actions": self.actions[rand_indices],
-            "rewards": self.rewards[rand_indices],
-            "next_observations": self.framebuffer[next_observation_framebuffer_idcs],
-            "dones": self.dones[rand_indices],
+            "observation": self.framebuffer[observation_framebuffer_idcs],
+            "action": self.actions[rand_indices],
+            "reward": self.rewards[rand_indices][:, None],
+            "next_observation": self.framebuffer[next_observation_framebuffer_idcs],
+            "done": self.dones[rand_indices],
         }
 
     def __len__(self):

@@ -25,7 +25,7 @@ def basic_dqn_config(
     target_update_period: int = 1000,
     clip_grad_norm: Optional[float] = None,
     use_double_q: bool = False,
-    learning_starts: int = 20000,
+    training_starts: int = 20000,
     batch_size: int = 128,
     **kwargs
 ):
@@ -79,9 +79,10 @@ def basic_dqn_config(
         },
         "exploration_schedule": exploration_schedule,
         "log_name": log_string,
+        "exp_name": exp_name,
         "make_env": make_env,
         "total_steps": total_steps,
         "batch_size": batch_size,
-        "learning_starts": learning_starts,
+        "training_starts": training_starts,
         **kwargs,
     }
