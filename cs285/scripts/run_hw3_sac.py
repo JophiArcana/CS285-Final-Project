@@ -58,9 +58,18 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
     exp_name = args.exp_name
     if exp_name is None and "exp_name" in config:
         exp_name = config["exp_name"]
+
+    centroid = np.zeros(ac_dim)
+
     for step in tqdm.trange(config["total_steps"], dynamic_ncols=True):
+        if step == confid["random_steps"]:
+            agent.centroid = centroid
+            if config["centroid_penalty"]:
+                agent.action_penalty_fn = agent.centroid_penalty
+
         if step < config["random_steps"]:
             action = env.action_space.sample()
+            centroid = (ptu.to_numpy(action) + step * centroid) / (step + 1)
         else:
             # DONE(student): Select an action
             action = agent.get_action(observation)
@@ -176,6 +185,9 @@ def main():
     parser.add_argument("--video_log_freq", type=int, default=-1)
     parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--save_frequency", type=int, default=10000)
+
+    # FINAL PROJECT ARGUMENTS
+    parser.add_argument("--centroid_penalty", type=bool, default=False)
 
     args = parser.parse_args()
 

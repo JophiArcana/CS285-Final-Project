@@ -94,6 +94,9 @@ class SoftActorCritic(nn.Module):
 
         self.update_target_critic()
 
+        self.centroid = None
+        self.action_penalty_fn = None
+
     def get_action(self, observation: np.ndarray) -> np.ndarray:
         """
         Compute the action for a given observation.
@@ -222,6 +225,12 @@ class SoftActorCritic(nn.Module):
             "q_values": q_values.mean().item(),
             "target_values": target_values.mean().item(),
         }
+
+    def centroid_penalty(self, action):
+        if centroid:
+            return np.sqrt(np.sum((action - self.centroid) ** 2))
+        else:
+            raise NotImplementedError
 
     def entropy(self, action_distribution: torch.distributions.Distribution):
         """
