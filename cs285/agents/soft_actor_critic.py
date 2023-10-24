@@ -277,10 +277,12 @@ class SoftActorCritic(nn.Module):
         loss = -torch.mean(log_probs * advantage)
 
         # FINAL PROJCT: add penalty
+        penalty = None
         if self.action_penalty_fn:
-            loss -= self.temperature * self.action_penalty_fn(action)
+            penalty = self.action_penalty_fn(action)
+            loss -= self.temperature * penalty
 
-        return loss, torch.mean(self.entropy(action_distribution))
+        return loss, torch.mean(self.entropy(action_distribution)), penalty
 
     def actor_loss_reparametrize(self, obs: torch.Tensor):
         batch_size = obs.shape[0]
@@ -299,10 +301,12 @@ class SoftActorCritic(nn.Module):
         loss = -torch.mean(q_values)
 
         # FINAL PROJCT: add penalty
+        penalty = None
         if self.action_penalty_fn:
-            loss -= self.temperature * self.action_penalty_fn(action)
+            penalty = self.action_penalty_fn(action)
+            loss -= self.temperature * penalty
 
-        return loss, torch.mean(self.entropy(action_distribution))
+        return loss, torch.mean(self.entropy(action_distribution)), penalty
 
     def update_actor(self, obs: torch.Tensor):
         """
@@ -310,9 +314,9 @@ class SoftActorCritic(nn.Module):
         """
 
         if self.actor_gradient_type == "reparametrize":
-            loss, entropy = self.actor_loss_reparametrize(obs)
+            loss, entropy, penalty = self.actor_loss_reparametrize(obs)
         elif self.actor_gradient_type == "reinforce":
-            loss, entropy = self.actor_loss_reinforce(obs)
+            loss, entropy, penalty = self.actor_loss_reinforce(obs)
 
         # Add entropy if necessary
         if self.use_entropy_bonus:
@@ -322,7 +326,7 @@ class SoftActorCritic(nn.Module):
         loss.backward()
         self.actor_optimizer.step()
 
-        return {"actor_loss": loss.item(), "entropy": entropy.item()}
+        return {"actor_loss": loss.item(), "entropy": entropy.item(), "penalty": penalty}
 
     def update_target_critic(self):
         self.soft_update_target_critic(1.0)
