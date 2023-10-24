@@ -208,6 +208,9 @@ class SoftActorCritic(nn.Module):
                 next_action_entropy = self.entropy(next_action_distribution)
                 next_qs += next_action_entropy
 
+            if self.action_penalty_fn:
+                next_qs += self.temperature * self.action_penalty_fn(next_action)
+
         # DONE(student): Update the critic
         # Predict Q-values
         q_values = self.critic(obs, action)
@@ -273,6 +276,10 @@ class SoftActorCritic(nn.Module):
         log_probs = action_distribution.log_prob(action)
         loss = -torch.mean(log_probs * advantage)
 
+        # FINAL PROJCT: add penalty
+        if self.action_penalty_fn:
+            loss -= self.temperature * self.action_penalty_fn(action)
+
         return loss, torch.mean(self.entropy(action_distribution))
 
     def actor_loss_reparametrize(self, obs: torch.Tensor):
@@ -290,6 +297,10 @@ class SoftActorCritic(nn.Module):
 
         # DONE(student): Compute the actor loss
         loss = -torch.mean(q_values)
+
+        # FINAL PROJCT: add penalty
+        if self.action_penalty_fn:
+            loss -= self.temperature * self.action_penalty_fn(action)
 
         return loss, torch.mean(self.entropy(action_distribution))
 
